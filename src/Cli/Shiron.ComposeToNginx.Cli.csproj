@@ -15,5 +15,6 @@
 
     <ItemGroup>
         <ProjectReference Include="..\generated\NginxProxySdk\NginxProxySdk.csproj" />
+        <ProjectReference Include="..\..\external\lib\src\DockerUtils\Shiron.Lib.DockerUtils.csproj" />
     </ItemGroup>
 </Project>
