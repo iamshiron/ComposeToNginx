@@ -23,6 +23,7 @@ app.Configure(c => {
     c.AddCommand<AsyncPushCommand>("push");
     c.AddBranch("hosts", b => {
         b.AddCommand<AsyncListHostsCommand>("ls");
+        b.AddCommand<AsyncAddHostCommand>("add");
     });
     c.AddBranch("certificates", b => {
         b.AddCommand<AsyncListCertificatesCommand>("ls");
