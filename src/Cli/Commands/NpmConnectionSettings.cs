@@ -36,7 +36,7 @@ public abstract class NpmConnectionSettings : CommandSettings {
         var email = Resolve(Email, EmailEnvKey, required: true, optionName: nameof(Email))!;
         var password = Resolve(Password, PasswordEnvKey, required: true, optionName: nameof(Password))!;
 
-        var baseUrl = host.TrimEnd('/') + "/api";
+        var baseUrl = $"{host.TrimEnd('/')}/api";
         return new NpmConnectionOptions(baseUrl, email, password);
     }
 

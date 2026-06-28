@@ -16,21 +16,21 @@ public sealed class AsyncListHostsCommand(INginxProxySdkFactory sdkFactory, IAns
         try {
             options = settings.ToConnectionOptions();
         } catch (InvalidOperationException ex) {
-            return Fail(console, "Configuration error", ex);
+            return console.WriteError("Configuration error", ex);
         }
 
         NginxProxySdk sdk;
         try {
             sdk = await sdkFactory.CreateAsync(options, cancellationToken).ConfigureAwait(false);
         } catch (Exception ex) {
-            return Fail(console, "Authentication failed", ex);
+            return console.WriteError("Authentication failed", ex);
         }
 
         List<ProxyHosts> hosts;
         try {
             hosts = await sdk.Nginx.ProxyHosts.GetAsync(cancellationToken: cancellationToken).ConfigureAwait(false) ?? [];
         } catch (Exception ex) {
-            return Fail(console, "Failed to fetch proxy hosts", ex);
+            return console.WriteError("Failed to fetch proxy hosts", ex);
         }
 
         if (hosts.Count == 0) {
@@ -64,11 +64,5 @@ public sealed class AsyncListHostsCommand(INginxProxySdkFactory sdkFactory, IAns
 
         console.Write(table);
         return 0;
-    }
-
-    private static int Fail(IAnsiConsole console, string prefix, Exception ex) {
-        var detail = ex is NpmApiException api ? $"({api.StatusCode}) {api.Message}" : ex.Message;
-        console.MarkupLine("[red]{0}:[/] {1}", Markup.Escape(prefix), Markup.Escape(detail));
-        return 1;
     }
 }

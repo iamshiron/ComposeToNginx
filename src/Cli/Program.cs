@@ -1,6 +1,7 @@
 using DotNetEnv;
 using Microsoft.Extensions.DependencyInjection;
 using Shiron.ComposeToNginx.Cli.Commands;
+using Shiron.ComposeToNginx.Cli.Commands.Certificates;
 using Shiron.ComposeToNginx.Cli.Commands.Hosts;
 using Shiron.ComposeToNginx.Cli.Infrastructure;
 using Shiron.ComposeToNginx.Cli.Services;
@@ -22,6 +23,9 @@ app.Configure(c => {
     c.AddCommand<AsyncPushCommand>("push");
     c.AddBranch("hosts", b => {
         b.AddCommand<AsyncListHostsCommand>("ls");
+    });
+    c.AddBranch("certificates", b => {
+        b.AddCommand<AsyncListCertificatesCommand>("ls");
     });
 });
 
