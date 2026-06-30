@@ -33,6 +33,10 @@ public sealed class AsyncPullHostsCommand(
         [CommandOption("--output")]
         [Description("Write the updated compose file here instead of overwriting the input. Lets you review before replacing the original.")]
         public string? Output { get; init; }
+
+        [CommandOption("--cert-ref")]
+        [Description("How to write npm.cert for SSL hosts: 'none' (omit, inferred on push — default) or 'nice-name' (write the certificate's name). Prompted when omitted in interactive mode.")]
+        public string? CertRef { get; init; }
     }
 
     protected override async Task<int> ExecuteAsync(CommandContext context, Settings settings, CancellationToken cancellationToken) {
@@ -57,6 +61,15 @@ public sealed class AsyncPullHostsCommand(
         if (services.Count == 0) {
             console.MarkupLine("[yellow]No services found in the compose file.[/]");
             return 0;
+        }
+
+        CertReferenceMode? specifiedCertRef = null;
+        if (settings.CertRef is not null) {
+            if (!TryParseCertRef(settings.CertRef, out var parsed)) {
+                return console.WriteError("Invalid --cert-ref", new ArgumentException(
+                    $"'{settings.CertRef}' is not a valid cert reference mode. Use 'none' or 'nice-name'."));
+            }
+            specifiedCertRef = parsed;
         }
 
         // ── 2. Connect + fetch NPM state (required for a pull) ────────────
@@ -92,7 +105,8 @@ public sealed class AsyncPullHostsCommand(
         console.MarkupLine("[bold]Backfill npm.* labels from NGINX Proxy Manager[/]");
         console.WriteLine();
 
-        var plan = pullPlanner.Plan(services, hosts, certs);
+        var certRefMode = specifiedCertRef ?? CertReferenceMode.None;
+        var plan = pullPlanner.Plan(services, hosts, certs, certRefMode);
 
         foreach (var skip in plan.Skipped)
             console.MarkupLine($"  [grey]Skip[/] [bold]{Markup.Escape(skip.Service)}[/][grey] — {ReasonText(skip.Reason)}.[/]");
@@ -103,7 +117,22 @@ public sealed class AsyncPullHostsCommand(
             return 0;
         }
 
-        // ── 4. Present ─────────────────────────────────────────────────────
+        // ── 4. Resolve cert-reference mode (interactive) ─────────────────
+        if (specifiedCertRef is null
+            && !settings.IsNonInteractive
+            && plan.Planned.Any(p => p.Labels.ContainsKey("npm.ssl"))) {
+            var choice = console.Prompt(
+                new SelectionPrompt<CertReferenceMode>()
+                    .Title("How should [blue]npm.cert[/] be written for SSL hosts?")
+                    .AddChoices(CertReferenceMode.None, CertReferenceMode.NiceName)
+                    .UseConverter(CertRefChoiceLabel));
+            if (choice != certRefMode) {
+                certRefMode = choice;
+                plan = pullPlanner.Plan(services, hosts, certs, certRefMode);
+            }
+        }
+
+        // ── 5. Present ─────────────────────────────────────────────────────
         console.WriteLine();
         RenderPlannedLabels(plan.Planned);
 
@@ -120,14 +149,14 @@ public sealed class AsyncPullHostsCommand(
             .Header($"[bold]Resulting compose file[/]{(settings.Output is not null ? "" : "  [grey](in-place)[/]")}")
             .Border(BoxBorder.Rounded));
 
-        // ── 5. Dry-run exit ───────────────────────────────────────────────
+        // ── 6. Dry-run exit ───────────────────────────────────────────────
         if (settings.DryRun) {
             console.WriteLine();
             console.MarkupLine($"[green]Dry run complete.[/] [grey]{plan.Planned.Count} service(s) would be labelled. No changes were made.[/]");
             return 0;
         }
 
-        // ── 6. Confirm ─────────────────────────────────────────────────────
+        // ── 7. Confirm ─────────────────────────────────────────────────────
         var destination = ResolveDestination(path, settings.Output);
 
         if (!settings.IsNonInteractive) {
@@ -138,7 +167,7 @@ public sealed class AsyncPullHostsCommand(
             }
         }
 
-        // ── 7. Apply ───────────────────────────────────────────────────────
+        // ── 8. Apply ───────────────────────────────────────────────────────
         try {
             await File.WriteAllTextAsync(destination, updated, cancellationToken).ConfigureAwait(false);
         } catch (Exception ex) {
@@ -150,6 +179,22 @@ public sealed class AsyncPullHostsCommand(
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
+
+    private static bool TryParseCertRef(string? raw, out CertReferenceMode mode) {
+        var norm = (raw ?? "").Trim().ToLowerInvariant().Replace("-", "").Replace("_", "");
+        mode = norm switch {
+            "none" => CertReferenceMode.None,
+            "nicename" => CertReferenceMode.NiceName,
+            _ => default
+        };
+        return norm is "none" or "nicename";
+    }
+
+    private static string CertRefChoiceLabel(CertReferenceMode mode) => mode switch {
+        CertReferenceMode.None => "none — omit npm.cert (inferred from domain on push)",
+        CertReferenceMode.NiceName => "nice-name — write the certificate's name",
+        _ => mode.ToString()
+    };
 
     private static string ResolveDestination(string inputPath, string? output) =>
         string.IsNullOrWhiteSpace(output) ? inputPath : output;

@@ -50,13 +50,20 @@ public sealed class PullPlanner {
     /// returned in <see cref="PullPlanResult.Skipped"/>.
     /// </summary>
     /// <param name="certificates">
-    /// Existing NPM certificates, used to attach a human-readable
-    /// <c>npm.cert</c> reference to SSL hosts. May be empty.
+    /// Existing NPM certificates. Only consulted when
+    /// <paramref name="certRefMode"/> is <see cref="CertReferenceMode.NiceName"/>,
+    /// to attach a human-readable <c>npm.cert</c> reference to SSL hosts. May be
+    /// empty.
+    /// </param>
+    /// <param name="certRefMode">
+    /// How to write <c>npm.cert</c> for SSL hosts. Defaults to
+    /// <see cref="CertReferenceMode.None"/> (omit; inferred on push).
     /// </param>
     public PullPlanResult Plan(
         IReadOnlyList<Service> services,
         IReadOnlyList<NpmProxyHostInfo> hosts,
-        IReadOnlyList<NpmCertificateInfo> certificates
+        IReadOnlyList<NpmCertificateInfo> certificates,
+        CertReferenceMode certRefMode = CertReferenceMode.None
     ) {
         ArgumentNullException.ThrowIfNull(services);
         ArgumentNullException.ThrowIfNull(hosts);
@@ -80,7 +87,7 @@ public sealed class PullPlanner {
                 continue;
             }
 
-            var labels = BuildLabels(service, match, certificates);
+            var labels = BuildLabels(service, match, certificates, certRefMode);
             planned.Add(new PlannedLabelEdit(
                 service.Name,
                 match.Id ?? 0,
@@ -132,7 +139,8 @@ public sealed class PullPlanner {
     // ── Label derivation ────────────────────────────────────────────────────
 
     private static Dictionary<string, string> BuildLabels(
-        Service service, NpmProxyHostInfo host, IReadOnlyList<NpmCertificateInfo> certificates
+        Service service, NpmProxyHostInfo host, IReadOnlyList<NpmCertificateInfo> certificates,
+        CertReferenceMode certRefMode
     ) {
         var labels = new Dictionary<string, string>(StringComparer.Ordinal);
 
@@ -166,9 +174,11 @@ public sealed class PullPlanner {
             if (host.SslForced is false)
                 labels[LabelConfigParser.ForceSslLabel] = "false";
 
-            var cert = certificates.FirstOrDefault(c => c.Id == certId);
-            if (!string.IsNullOrWhiteSpace(cert?.NiceName))
-                labels[LabelConfigParser.CertLabel] = cert!.NiceName;
+            if (certRefMode == CertReferenceMode.NiceName) {
+                var cert = certificates.FirstOrDefault(c => c.Id == certId);
+                if (!string.IsNullOrWhiteSpace(cert?.NiceName))
+                    labels[LabelConfigParser.CertLabel] = cert!.NiceName;
+            }
         }
 
         // npm.enabled — defaults to true, so only emit when disabled.

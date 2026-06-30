@@ -171,7 +171,7 @@ public class PullPlannerTests {
     // ── Label derivation: SSL ───────────────────────────────────────────────
 
     [Fact]
-    public void Plan_SslHost_EmitsSslAndCertReferenceFromNiceName() {
+    public void Plan_CertRefNone_Default_OmitsCertLabel() {
         var services = new[] {
             TestServiceFactory.MakeService(name: "api", ports: ["8080:80"]),
         };
@@ -179,6 +179,34 @@ public class PullPlannerTests {
         var certs = new[] { Cert(5, "Wildcard Example", "*.example.com") };
 
         var labels = _planner.Plan(services, hosts, certs).Planned[0].Labels;
+
+        Assert.Equal("true", labels["npm.ssl"]);
+        Assert.False(labels.ContainsKey("npm.cert"));
+    }
+
+    [Fact]
+    public void Plan_CertRefNone_Explicit_OmitsCertLabel() {
+        var services = new[] {
+            TestServiceFactory.MakeService(name: "api", ports: ["8080:80"]),
+        };
+        var hosts = new[] { Host(1, "api.example.com", "127.0.0.1", 8080, certId: 5, sslForced: true) };
+        var certs = new[] { Cert(5, "Wildcard Example", "*.example.com") };
+
+        var labels = _planner.Plan(services, hosts, certs, CertReferenceMode.None).Planned[0].Labels;
+
+        Assert.Equal("true", labels["npm.ssl"]);
+        Assert.False(labels.ContainsKey("npm.cert"));
+    }
+
+    [Fact]
+    public void Plan_CertRefNiceName_EmitsSslAndCertFromNiceName() {
+        var services = new[] {
+            TestServiceFactory.MakeService(name: "api", ports: ["8080:80"]),
+        };
+        var hosts = new[] { Host(1, "api.example.com", "127.0.0.1", 8080, certId: 5, sslForced: true) };
+        var certs = new[] { Cert(5, "Wildcard Example", "*.example.com") };
+
+        var labels = _planner.Plan(services, hosts, certs, CertReferenceMode.NiceName).Planned[0].Labels;
 
         Assert.Equal("true", labels["npm.ssl"]);
         Assert.Equal("Wildcard Example", labels["npm.cert"]);
@@ -206,7 +234,7 @@ public class PullPlannerTests {
         };
         var hosts = new[] { Host(1, "api.example.com", "127.0.0.1", 8080, certId: 99) };
 
-        var labels = _planner.Plan(services, hosts, []).Planned[0].Labels;
+        var labels = _planner.Plan(services, hosts, [], CertReferenceMode.NiceName).Planned[0].Labels;
 
         Assert.Equal("true", labels["npm.ssl"]);
         Assert.False(labels.ContainsKey("npm.cert"));
@@ -281,7 +309,7 @@ public class PullPlannerTests {
     // ── Round-trip ──────────────────────────────────────────────────────────
 
     [Fact]
-    public void Plan_GeneratedLabels_AreParseableByLabelConfigParser() {
+    public void Plan_CertRefNiceName_GeneratedLabelsAreParseableByLabelConfigParser() {
         // The whole point of pull: the generated labels must be valid input to push.
         var services = new[] {
             TestServiceFactory.MakeService(name: "api", containerName: "api", ports: ["8080:80"]),
@@ -291,7 +319,7 @@ public class PullPlannerTests {
         };
         var certs = new[] { Cert(5, "Wildcard", "api.example.com") };
 
-        var labels = _planner.Plan(services, hosts, certs).Planned[0].Labels;
+        var labels = _planner.Plan(services, hosts, certs, CertReferenceMode.NiceName).Planned[0].Labels;
 
         var reparsed = Core.Labels.LabelConfigParser.TryParse(new Lib.DockerUtils.Model.Service {
             Name = "api",
@@ -313,5 +341,41 @@ public class PullPlannerTests {
         Assert.True(reparsed.Ssl);
         Assert.Equal("Wildcard", reparsed.Certificate);
         Assert.True(reparsed.ForceSsl);
+    }
+
+    [Fact]
+    public void Plan_CertRefNone_GeneratedLabelsAreParseableAndInferCertOnPush() {
+        // With the default mode, npm.cert is omitted but npm.ssl remains, so push
+        // resolves the certificate by domain coverage (no label needed).
+        var services = new[] {
+            TestServiceFactory.MakeService(name: "api", containerName: "api", ports: ["8080:80"]),
+        };
+        var hosts = new[] {
+            Host(1, "api.example.com", "backend", 8080, scheme: "https", certId: 5, sslForced: true),
+        };
+        var certs = new[] { Cert(5, "Wildcard", "api.example.com") };
+
+        var labels = _planner.Plan(services, hosts, certs).Planned[0].Labels;
+
+        Assert.False(labels.ContainsKey("npm.cert"));
+
+        var reparsed = Core.Labels.LabelConfigParser.TryParse(new Lib.DockerUtils.Model.Service {
+            Name = "api",
+            Image = "x",
+            ContainerName = "api",
+            Restart = null,
+            Ports = new[] { new Lib.DockerUtils.Model.PortForward { ContainerPort = "80", HostPort = "8080" } },
+            Volumes = [],
+            Environment = [],
+            Networks = [],
+            Labels = labels.ToDictionary(k => k.Key, k => k.Value),
+        });
+
+        Assert.NotNull(reparsed);
+        Assert.True(reparsed!.Ssl);
+        Assert.Null(reparsed.Certificate);
+
+        var resolver = new Core.Certificates.CertificateResolver();
+        Assert.Equal(5, resolver.FindByDomain(certs, reparsed.Domains[0]));
     }
 }
