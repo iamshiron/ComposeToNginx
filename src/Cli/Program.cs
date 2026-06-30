@@ -7,6 +7,7 @@ using Shiron.ComposeToNginx.Cli.Infrastructure;
 using Shiron.ComposeToNginx.Cli.Services;
 using Shiron.ComposeToNginx.Cli.Services.Impl;
 using Shiron.ComposeToNginx.Core.Certificates;
+using Shiron.ComposeToNginx.Core.Labels;
 using Shiron.ComposeToNginx.Core.Planning;
 using Shiron.Lib.DockerUtils;
 using Spectre.Console.Cli;
@@ -19,6 +20,8 @@ services.AddSingleton<INpmClientFactory, NpmClientFactory>();
 services.AddSingleton<IComposeReader, ComposeReader>();
 services.AddSingleton<ICertificateResolver, CertificateResolver>();
 services.AddSingleton<HostPlanner>();
+services.AddSingleton<PullPlanner>();
+services.AddSingleton<IComposeLabelWriter, ComposeLabelWriter>();
 
 var registrar = new TypeRegistrar(services);
 var app = new CommandApp(registrar);
@@ -30,6 +33,7 @@ app.Configure(c => {
         b.AddCommand<AsyncListHostsCommand>("ls");
         b.AddCommand<AsyncAddHostCommand>("add");
         b.AddCommand<AsyncPushHostsCommand>("push");
+        b.AddCommand<AsyncPullHostsCommand>("pull");
     });
     c.AddBranch("certificates", b => {
         b.AddCommand<AsyncListCertificatesCommand>("ls");
