@@ -15,6 +15,7 @@ Env.Load();
 var services = new ServiceCollection();
 services.AddSingleton<INginxProxySdkFactory, NginxProxySdkFactory>();
 services.AddSingleton<IComposeReader, ComposeReader>();
+services.AddSingleton<ICertificateResolver, CertificateResolver>();
 
 var registrar = new TypeRegistrar(services);
 var app = new CommandApp(registrar);

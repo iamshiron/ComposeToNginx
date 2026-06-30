@@ -2,24 +2,25 @@
   <Folder Name="/external/" />
   <Folder Name="/external/lib/">
     <Project Path="external/lib/src/Collections/Shiron.Lib.Collections.csproj" />
-    <Project Path="external/lib/src/Concurrency/Shiron.Lib.Concurrency.csproj" />
     <Project Path="external/lib/src/DockerUtils/Shiron.Lib.DockerUtils.csproj" />
     <Project Path="external/lib/src/Flow/Shiron.Lib.Flow.csproj" />
     <Project Path="external/lib/src/Logging/Shiron.Lib.Logging.csproj" />
     <Project Path="external/lib/src/Networking/Shiron.Lib.Networking.csproj" />
-    <Project Path="external/lib/src/Pipeline.Ext.DI/Shiron.Lib.Pipeline.Ext.DI.csproj" />
-    <Project Path="external/lib/src/Pipeline/Shiron.Lib.Pipeline.csproj" />
     <Project Path="external/lib/src/Profiling/Shiron.Lib.Profiling.csproj" />
     <Project Path="external/lib/src/Types.Ext.Conversion/Shiron.Lib.Types.Ext.Conversion.csproj" />
     <Project Path="external/lib/src/Types.Ext.EFCore/Shiron.Lib.Types.Ext.EFCore.csproj" />
     <Project Path="external/lib/src/Types/Shiron.Lib.Types.csproj" />
     <Project Path="external/lib/src/Utils/Shiron.Lib.Utils.csproj" />
     <Project Path="external/lib/src/Vulkan/Shiron.Lib.Vulkan.csproj" />
+    <Project Path="external/lib/tests/DockerUtils/Shiron.Lib.Tests.DockerUtils.csproj" />
   </Folder>
   <Folder Name="/src/">
     <Project Path="src/Cli/Shiron.ComposeToNginx.Cli.csproj" />
   </Folder>
   <Folder Name="/src/generated/">
     <Project Path="src/generated/NginxProxySdk/NginxProxySdk.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/ComposeToNginx/Shiron.ComposeToNginx.Tests.csproj" />
   </Folder>
 </Solution>

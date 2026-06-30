@@ -13,7 +13,7 @@ public sealed class AsyncAddHostCommand(INginxProxySdkFactory sdkFactory, IAnsiC
     private const int MinPort = 1;
     private const int MaxPort = 65535;
 
-    public sealed class Settings : NpmConnectionSettings;
+    public sealed class Settings : NpmMutationSettings;
 
     protected override async Task<int> ExecuteAsync(CommandContext context, Settings settings, CancellationToken cancellationToken) {
         NpmConnectionOptions options;
@@ -52,11 +52,6 @@ public sealed class AsyncAddHostCommand(INginxProxySdkFactory sdkFactory, IAnsiC
 
         RenderSummary(domains, scheme, forwardHost, forwardPort, certificateId, sslForced, http2Support, hstsEnabled, blockExploits, cachingEnabled, allowWebsocket, enabled);
 
-        if (!console.Confirm("Create this proxy host?", defaultValue: true)) {
-            console.MarkupLine("[yellow]Cancelled. No host was created.[/]");
-            return 0;
-        }
-
         var body = new ProxyHostsPostRequestBody {
             DomainNames = domains,
             ForwardScheme = scheme,
@@ -71,6 +66,20 @@ public sealed class AsyncAddHostCommand(INginxProxySdkFactory sdkFactory, IAnsiC
             AllowWebsocketUpgrade = allowWebsocket,
             Enabled = enabled,
         };
+
+        // ── Dry-run: preview only ──────────────────────────────────────
+        if (settings.DryRun) {
+            console.MarkupLine($"[green]Dry run complete.[/] [grey]1 host would be created. No changes were made.[/]");
+            return 0;
+        }
+
+        // ── Confirm (skipped with --yes) ───────────────────────────────
+        if (!settings.IsNonInteractive) {
+            if (!console.Confirm("Create this proxy host?", defaultValue: true)) {
+                console.MarkupLine("[yellow]Cancelled. No host was created.[/]");
+                return 0;
+            }
+        }
 
         ProxyHostsPostResponse? created;
         try {
