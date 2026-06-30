@@ -4,7 +4,7 @@
 
 A .NET CLI that turns a Docker Compose file into proxy hosts in [NGINX Proxy Manager (NPM)](https://github.com/NginxProxyManager/nginx-proxy-manager). Each service with a published port becomes a host you can review and push — no web UI clicking required.
 
-Declare proxy intent declaratively with `npm.*` labels for fully non-interactive CI/CD pipelines, or use the interactive prompts for ad-hoc setup.
+Declare proxy intent declaratively with `npm.*` labels for fully non-interactive CI/CD pipelines, or use the interactive prompts for ad-hoc setup. Already managing hosts in NPM? `hosts pull` backfills the matching labels onto your Compose file automatically.
 
 ## Requirements
 
@@ -57,7 +57,7 @@ compose-to-nginx <command> [options]
 
 ### Shared flags
 
-Commands that **mutate** NPM state (`hosts push`, `hosts add`) share these transactional flags:
+Commands that **write** state (`hosts push`, `hosts add`, `hosts pull`) share these transactional flags:
 
 | Flag | Short | Description |
 |---|---|---|
@@ -73,10 +73,7 @@ Commands that **mutate** NPM state (`hosts push`, `hosts add`) share these trans
 
 ### `hosts push <file>`
 
-Reads a Compose file and creates one proxy host per service. Two modes:
-
-- **Label-driven** (non-interactive): services with `npm.host` labels are planned automatically.
-- **Interactive** (fallback): services without labels prompt for a domain choice.
+Reads a Compose file and reconciles proxy hosts in NPM against it. Services with `npm.*` labels are planned automatically; unlabelled services are handled according to [`--label-mode`](#--label-mode). Hosts that already match NPM are left untouched (see [Sync detection](#sync-detection)).
 
 ```bash
 # Preview only — nothing is written to NPM
@@ -95,7 +92,7 @@ Controls how `npm.*` labels are interpreted:
 
 | Mode | Behaviour |
 |---|---|
-| `auto` (default) | Use labels when present; fall back to interactive prompts for unlabelled services. In `--yes` mode, unlabelled services are **skipped with a warning**. |
+| `auto` (default) | **All services labelled** → label-driven (no prompts). **Some labelled** → asks whether to skip the unlabelled services or fill them in interactively. **None labelled** → interactive mode for all. With `--yes`, unlabelled services are always skipped. |
 | `require` | Every service with a port must have an `npm.host` label. The command **errors** if any are missing. |
 | `ignore` | Ignore all labels; always use interactive prompts. |
 
@@ -108,6 +105,47 @@ compose-to-nginx hosts push docker-compose.yml --label-mode require --yes
 - The **first published port** on each service becomes the forward port (unless overridden by `npm.forward-port`); services with no usable single numeric port are skipped.
 - Existing NPM hosts with the same domain signature are detected and **overwritten** (deleted then recreated).
 - When SSL is enabled, a certificate is resolved (see [Certificate resolution](#certificate-resolution)).
+
+#### Sync detection
+
+`hosts push` is idempotent. Before applying, each planned host is compared against the existing NPM host it would overwrite (forward host/port, SSL, certificate). Hosts that already match are **skipped**. If every host is already in sync, the command reports "nothing to do" and exits without making changes.
+
+### `hosts pull <file>`
+
+The inverse of `hosts push`: reads the proxy hosts already in NPM and **backfills `npm.*` labels** onto the matching services in a Compose file — turning a manually managed (or previously pushed) setup into a label-driven one.
+
+Each service is matched to an NPM host by its published port (preferring a forward-host name match), and the minimal set of labels reproducing that host's configuration is derived. Services that already carry `npm.host`, expose no ports, or have no matching host are skipped.
+
+```bash
+# Preview the labels that would be added
+compose-to-nginx hosts pull docker-compose.yml --dry-run
+
+# Backfill in place (after review)
+compose-to-nginx hosts pull docker-compose.yml
+
+# Write to a separate file to review before replacing the original
+compose-to-nginx hosts pull docker-compose.yml --output docker-compose.labelled.yml
+```
+
+The Compose file is edited surgically — comments, formatting, and non-`npm.*` labels are preserved, and the result is re-parsed to verify it's still valid YAML before being written.
+
+| Flag | Description |
+|---|---|
+| `--output <file>` | Write the updated Compose file here instead of overwriting the input. |
+| `--cert-ref <mode>` | How to write `npm.cert` for SSL hosts (see below). |
+
+#### `--cert-ref`
+
+Controls how the `npm.cert` label is written for SSL hosts. Prompted interactively when omitted (and at least one SSL host exists); defaults to `none` under `--yes`.
+
+| Mode | Behaviour |
+|---|---|
+| `none` (default) | Omit `npm.cert`. On `push`, the certificate is inferred from the host domain (see [Certificate resolution](#certificate-resolution)). Produces the shortest labels. |
+| `nice-name` | Write the certificate's NPM name verbatim. Explicit, and disambiguates when multiple certificates cover the same domain, but brittle if the certificate's domain order (and therefore its auto-generated name) ever changes. |
+
+```bash
+compose-to-nginx hosts pull docker-compose.yml --cert-ref nice-name
+```
 
 ### `hosts ls`
 
