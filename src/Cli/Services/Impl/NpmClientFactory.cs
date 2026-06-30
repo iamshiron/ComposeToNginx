@@ -4,15 +4,17 @@ using System.Text.Json;
 using Microsoft.Kiota.Abstractions.Authentication;
 using Microsoft.Kiota.Http.HttpClientLibrary;
 using NginxProxy.Sdk;
+using Shiron.ComposeToNginx.Core.Npm;
 
 namespace Shiron.ComposeToNginx.Cli.Services.Impl;
 
 /// <summary>
 /// Authenticates with NGINX Proxy Manager using email/password credentials and
-/// returns an authorized <see cref="NginxProxySdk"/>.
+/// returns an authorized <see cref="INpmClient"/> backed by the generated SDK.
 /// </summary>
-public sealed class NginxProxySdkFactory : INginxProxySdkFactory {
-    public async Task<NginxProxySdk> CreateAsync(NpmConnectionOptions options, CancellationToken cancellationToken = default) {
+public sealed class NpmClientFactory : INpmClientFactory {
+    /// <inheritdoc/>
+    public async Task<INpmClient> CreateAsync(NpmConnectionOptions options, CancellationToken cancellationToken = default) {
         // A single HttpClient (with the error handler) is shared by the
         // unauthenticated token request and the authenticated data requests.
         var httpClient = CreateHttpClient();
@@ -23,7 +25,8 @@ public sealed class NginxProxySdkFactory : INginxProxySdkFactory {
         var adapter = new HttpClientRequestAdapter(authProvider, parseNodeFactory: null, serializationWriterFactory: null, httpClient, observabilityOptions: null) {
             BaseUrl = options.BaseUrl,
         };
-        return new NginxProxySdk(adapter);
+        var sdk = new NginxProxySdk(adapter);
+        return new NpmClientAdapter(sdk);
     }
 
     private static HttpClient CreateHttpClient() {

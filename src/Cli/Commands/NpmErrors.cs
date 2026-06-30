@@ -1,4 +1,4 @@
-using Shiron.ComposeToNginx.Cli.Services;
+using Shiron.ComposeToNginx.Core.Npm;
 using Spectre.Console;
 
 namespace Shiron.ComposeToNginx.Cli.Commands;

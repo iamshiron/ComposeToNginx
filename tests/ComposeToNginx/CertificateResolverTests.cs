@@ -1,14 +1,14 @@
-using Shiron.ComposeToNginx.Cli.Services;
-using Shiron.ComposeToNginx.Cli.Services.Impl;
+using Shiron.ComposeToNginx.Core.Certificates;
+using Shiron.ComposeToNginx.Core.Npm;
 using Xunit;
 
 namespace Shiron.ComposeToNginx.Tests;
 
 public class CertificateResolverTests {
     private static readonly NpmCertificateInfo[] Certs = [
-        new(1, "Wildcard Example", ["*.example.com"], "letsencrypt"),
-        new(2, "API Cert", ["api.example.com"], "letsencrypt"),
-        new(3, "Multi", ["a.example.org", "b.example.org"], "letsencrypt"),
+        new(1, "Wildcard Example", ["*.example.com"], "letsencrypt", null),
+        new(2, "API Cert", ["api.example.com"], "letsencrypt", null),
+        new(3, "Multi", ["a.example.org", "b.example.org"], "letsencrypt", null),
     ];
 
     private readonly CertificateResolver _resolver = new();

@@ -16,7 +16,7 @@
     </ItemGroup>
 
     <ItemGroup>
-        <ProjectReference Include="..\..\src\Cli\Shiron.ComposeToNginx.Cli.csproj"/>
+        <ProjectReference Include="..\..\src\Core\Shiron.ComposeToNginx.Core.csproj"/>
     </ItemGroup>
 
 </Project>

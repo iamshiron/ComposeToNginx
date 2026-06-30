@@ -15,6 +15,7 @@
     <Project Path="external/lib/tests/DockerUtils/Shiron.Lib.Tests.DockerUtils.csproj" />
   </Folder>
   <Folder Name="/src/">
+    <Project Path="src/Core/Shiron.ComposeToNginx.Core.csproj" />
     <Project Path="src/Cli/Shiron.ComposeToNginx.Cli.csproj" />
   </Folder>
   <Folder Name="/src/generated/">

@@ -1,7 +1,7 @@
 using Shiron.Lib.DockerUtils.Model;
 using System.Text.RegularExpressions;
 
-namespace Shiron.ComposeToNginx.Cli.Services;
+namespace Shiron.ComposeToNginx.Core.Labels;
 
 /// <summary>
 /// Parses Docker Compose <c>npm.*</c> labels on a <see cref="Service"/> into a

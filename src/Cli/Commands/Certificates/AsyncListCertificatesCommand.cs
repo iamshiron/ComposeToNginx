@@ -1,6 +1,5 @@
-using NginxProxy.Sdk;
-using NpmCertificate = NginxProxy.Sdk.Nginx.Certificates.Certificates;
 using Shiron.ComposeToNginx.Cli.Services;
+using Shiron.ComposeToNginx.Core.Npm;
 using Spectre.Console;
 using Spectre.Console.Cli;
 using System.ComponentModel;
@@ -9,7 +8,7 @@ using System.Globalization;
 namespace Shiron.ComposeToNginx.Cli.Commands.Certificates;
 
 [Description("List the certificates currently registered in NGINX Proxy Manager.")]
-public sealed class AsyncListCertificatesCommand(INginxProxySdkFactory sdkFactory, IAnsiConsole console) : AsyncCommand<AsyncListCertificatesCommand.Settings> {
+public sealed class AsyncListCertificatesCommand(INpmClientFactory clientFactory, IAnsiConsole console) : AsyncCommand<AsyncListCertificatesCommand.Settings> {
     private const int ExpiryWarningDays = 30;
 
     public sealed class Settings : NpmConnectionSettings;
@@ -22,16 +21,16 @@ public sealed class AsyncListCertificatesCommand(INginxProxySdkFactory sdkFactor
             return console.WriteError("Configuration error", ex);
         }
 
-        NginxProxySdk sdk;
+        INpmClient client;
         try {
-            sdk = await sdkFactory.CreateAsync(options, cancellationToken).ConfigureAwait(false);
+            client = await clientFactory.CreateAsync(options, cancellationToken).ConfigureAwait(false);
         } catch (Exception ex) {
             return console.WriteError("Authentication failed", ex);
         }
 
-        List<NpmCertificate> certificates;
+        IReadOnlyList<NpmCertificateInfo> certificates;
         try {
-            certificates = await sdk.Nginx.Certificates.GetAsync(cancellationToken: cancellationToken).ConfigureAwait(false) ?? [];
+            certificates = await client.GetCertificatesAsync(cancellationToken).ConfigureAwait(false);
         } catch (Exception ex) {
             return console.WriteError("Failed to fetch certificates", ex);
         }
@@ -49,7 +48,7 @@ public sealed class AsyncListCertificatesCommand(INginxProxySdkFactory sdkFactor
         table.AddColumn(new TableColumn("Status").Centered());
 
         foreach (var cert in certificates) {
-            var id = cert.Id?.ToString() ?? "?";
+            var id = cert.Id.ToString();
             var provider = Markup.Escape(cert.Provider ?? "-");
             var domains = cert.DomainNames is { Count: > 0 } names
                 ? Markup.Escape(string.Join(", ", names))

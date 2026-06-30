@@ -1,7 +1,5 @@
-using NginxProxy.Sdk;
-using NpmCertificate = NginxProxy.Sdk.Nginx.Certificates.Certificates;
-using NginxProxy.Sdk.Nginx.ProxyHosts;
 using Shiron.ComposeToNginx.Cli.Services;
+using Shiron.ComposeToNginx.Core.Npm;
 using Spectre.Console;
 using Spectre.Console.Cli;
 using System.ComponentModel;
@@ -9,7 +7,7 @@ using System.ComponentModel;
 namespace Shiron.ComposeToNginx.Cli.Commands.Hosts;
 
 [Description("Interactively create a new proxy host in NGINX Proxy Manager.")]
-public sealed class AsyncAddHostCommand(INginxProxySdkFactory sdkFactory, IAnsiConsole console) : AsyncCommand<AsyncAddHostCommand.Settings> {
+public sealed class AsyncAddHostCommand(INpmClientFactory clientFactory, IAnsiConsole console) : AsyncCommand<AsyncAddHostCommand.Settings> {
     private const int MinPort = 1;
     private const int MaxPort = 65535;
 
@@ -23,9 +21,9 @@ public sealed class AsyncAddHostCommand(INginxProxySdkFactory sdkFactory, IAnsiC
             return console.WriteError("Configuration error", ex);
         }
 
-        NginxProxySdk sdk;
+        INpmClient client;
         try {
-            sdk = await sdkFactory.CreateAsync(options, cancellationToken).ConfigureAwait(false);
+            client = await clientFactory.CreateAsync(options, cancellationToken).ConfigureAwait(false);
         } catch (Exception ex) {
             return console.WriteError("Authentication failed", ex);
         }
@@ -39,7 +37,7 @@ public sealed class AsyncAddHostCommand(INginxProxySdkFactory sdkFactory, IAnsiC
         var forwardHost = PromptForwardHost();
         var forwardPort = PromptForwardPort();
 
-        var certificates = await FetchCertificatesAsync(sdk, cancellationToken).ConfigureAwait(false);
+        var certificates = await FetchCertificatesAsync(client, cancellationToken).ConfigureAwait(false);
         var certificateId = PromptCertificate(certificates);
 
         var sslForced = certificateId is not null && console.Confirm("Force SSL (redirect HTTP to HTTPS)?", defaultValue: true);
@@ -52,20 +50,20 @@ public sealed class AsyncAddHostCommand(INginxProxySdkFactory sdkFactory, IAnsiC
 
         RenderSummary(domains, scheme, forwardHost, forwardPort, certificateId, sslForced, http2Support, hstsEnabled, blockExploits, cachingEnabled, allowWebsocket, enabled);
 
-        var body = new ProxyHostsPostRequestBody {
-            DomainNames = domains,
-            ForwardScheme = scheme,
-            ForwardHost = forwardHost,
-            ForwardPort = forwardPort,
-            CertificateId = certificateId is null ? null : new() { Integer = certificateId },
-            SslForced = sslForced,
-            Http2Support = http2Support,
-            HstsEnabled = hstsEnabled,
-            BlockExploits = blockExploits,
-            CachingEnabled = cachingEnabled,
-            AllowWebsocketUpgrade = allowWebsocket,
-            Enabled = enabled,
-        };
+        var request = new ProxyHostCreateRequest(
+            domains,
+            scheme,
+            forwardHost,
+            forwardPort,
+            certificateId,
+            SslForced: sslForced,
+            Http2Support: http2Support,
+            HstsEnabled: hstsEnabled,
+            BlockExploits: blockExploits,
+            CachingEnabled: cachingEnabled,
+            AllowWebsocketUpgrade: allowWebsocket,
+            Enabled: enabled
+        );
 
         // ── Dry-run: preview only ──────────────────────────────────────
         if (settings.DryRun) {
@@ -81,14 +79,14 @@ public sealed class AsyncAddHostCommand(INginxProxySdkFactory sdkFactory, IAnsiC
             }
         }
 
-        ProxyHostsPostResponse? created;
+        int? createdId;
         try {
-            created = await sdk.Nginx.ProxyHosts.PostAsProxyHostsPostResponseAsync(body, cancellationToken: cancellationToken).ConfigureAwait(false);
+            createdId = await client.CreateProxyHostAsync(request, cancellationToken).ConfigureAwait(false);
         } catch (Exception ex) {
             return console.WriteError("Failed to create proxy host", ex);
         }
 
-        console.MarkupLine($"[green]Proxy host created.[/] ID: [blue]{created?.Id?.ToString() ?? "?"}[/]");
+        console.MarkupLine($"[green]Proxy host created.[/] ID: [blue]{createdId?.ToString() ?? "?"}[/]");
         return 0;
     }
 
@@ -102,13 +100,13 @@ public sealed class AsyncAddHostCommand(INginxProxySdkFactory sdkFactory, IAnsiC
         return SplitDomains(input);
     }
 
-    private ProxyHostsPostRequestBody_forward_scheme PromptScheme() {
+    private string PromptScheme() {
         var scheme = console.Prompt(
             new SelectionPrompt<string>()
                 .Title("Forward scheme")
                 .AddChoices("http", "https")
         );
-        return scheme == "https" ? ProxyHostsPostRequestBody_forward_scheme.Https : ProxyHostsPostRequestBody_forward_scheme.Http;
+        return scheme;
     }
 
     private string PromptForwardHost() =>
@@ -127,16 +125,16 @@ public sealed class AsyncAddHostCommand(INginxProxySdkFactory sdkFactory, IAnsiC
                     : ValidationResult.Error($"[red]Port must be between {MinPort} and {MaxPort}.[/]"))
         );
 
-    private async Task<List<NpmCertificate>> FetchCertificatesAsync(NginxProxySdk sdk, CancellationToken cancellationToken) {
+    private async Task<IReadOnlyList<NpmCertificateInfo>> FetchCertificatesAsync(INpmClient client, CancellationToken cancellationToken) {
         try {
-            return await sdk.Nginx.Certificates.GetAsync(cancellationToken: cancellationToken).ConfigureAwait(false) ?? [];
+            return await client.GetCertificatesAsync(cancellationToken).ConfigureAwait(false);
         } catch (Exception ex) {
             console.MarkupLine($"[yellow]Could not load certificates ({Markup.Escape(ex.Message)}). Continuing without certificate selection.[/]");
             return [];
         }
     }
 
-    private int? PromptCertificate(List<NpmCertificate> certificates) {
+    private int? PromptCertificate(IReadOnlyList<NpmCertificateInfo> certificates) {
         if (certificates.Count == 0) {
             console.MarkupLine("[grey]No certificates available — the host will be created without SSL.[/]");
             return null;
@@ -154,7 +152,7 @@ public sealed class AsyncAddHostCommand(INginxProxySdkFactory sdkFactory, IAnsiC
         return selected.Id;
     }
 
-    private static CertificateChoice ToCertificateChoice(NpmCertificate cert) {
+    private static CertificateChoice ToCertificateChoice(NpmCertificateInfo cert) {
         var label = cert.DomainNames is { Count: > 0 } names
             ? string.Join(", ", names)
             : cert.NiceName ?? $"Certificate #{cert.Id}";
@@ -162,15 +160,14 @@ public sealed class AsyncAddHostCommand(INginxProxySdkFactory sdkFactory, IAnsiC
     }
 
     private void RenderSummary(
-        List<string> domains, ProxyHostsPostRequestBody_forward_scheme scheme, string forwardHost, int forwardPort,
+        List<string> domains, string scheme, string forwardHost, int forwardPort,
         int? certificateId, bool sslForced, bool http2Support, bool hstsEnabled, bool blockExploits, bool cachingEnabled, bool allowWebsocket, bool enabled
     ) {
-        var schemeStr = scheme.ToString().ToLowerInvariant();
         var grid = new Grid()
             .AddColumn(new GridColumn().NoWrap().PadRight(2))
             .AddColumn()
             .AddRow("[bold]Domains[/]", Markup.Escape(string.Join(", ", domains)))
-            .AddRow("[bold]Forward[/]", Markup.Escape($"{schemeStr}://{forwardHost}:{forwardPort}"))
+            .AddRow("[bold]Forward[/]", Markup.Escape($"{scheme}://{forwardHost}:{forwardPort}"))
             .AddRow("[bold]Certificate[/]", certificateId is null ? "[grey]None[/]" : $"#{certificateId}")
             .AddRow("[bold]SSL forced[/]", sslForced ? "[green]Yes[/]" : "[grey]No[/]")
             .AddRow("[bold]HTTP/2[/]", http2Support ? "[green]Yes[/]" : "[grey]No[/]")

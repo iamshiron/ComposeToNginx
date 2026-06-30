@@ -1,4 +1,4 @@
-namespace Shiron.ComposeToNginx.Cli.Services;
+namespace Shiron.ComposeToNginx.Core.Npm;
 
 /// <summary>
 /// Thrown when NGINX Proxy Manager returns a non-success HTTP status code.

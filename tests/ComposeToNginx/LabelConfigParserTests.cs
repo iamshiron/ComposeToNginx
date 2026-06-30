@@ -1,4 +1,4 @@
-using Shiron.ComposeToNginx.Cli.Services;
+using Shiron.ComposeToNginx.Core.Labels;
 using Shiron.Lib.DockerUtils.Model;
 using Xunit;
 

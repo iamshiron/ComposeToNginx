@@ -6,6 +6,8 @@ using Shiron.ComposeToNginx.Cli.Commands.Hosts;
 using Shiron.ComposeToNginx.Cli.Infrastructure;
 using Shiron.ComposeToNginx.Cli.Services;
 using Shiron.ComposeToNginx.Cli.Services.Impl;
+using Shiron.ComposeToNginx.Core.Certificates;
+using Shiron.ComposeToNginx.Core.Planning;
 using Shiron.Lib.DockerUtils;
 using Spectre.Console.Cli;
 
@@ -13,9 +15,10 @@ using Spectre.Console.Cli;
 Env.Load();
 
 var services = new ServiceCollection();
-services.AddSingleton<INginxProxySdkFactory, NginxProxySdkFactory>();
+services.AddSingleton<INpmClientFactory, NpmClientFactory>();
 services.AddSingleton<IComposeReader, ComposeReader>();
 services.AddSingleton<ICertificateResolver, CertificateResolver>();
+services.AddSingleton<HostPlanner>();
 
 var registrar = new TypeRegistrar(services);
 var app = new CommandApp(registrar);

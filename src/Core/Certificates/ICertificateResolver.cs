@@ -1,6 +1,6 @@
-using NginxProxy.Sdk;
+using Shiron.ComposeToNginx.Core.Npm;
 
-namespace Shiron.ComposeToNginx.Cli.Services;
+namespace Shiron.ComposeToNginx.Core.Certificates;
 
 /// <summary>
 /// Resolves NPM certificates by nice-name or by domain coverage (including
@@ -9,12 +9,6 @@ namespace Shiron.ComposeToNginx.Cli.Services;
 /// <c>npm.cert</c> is omitted.
 /// </summary>
 public interface ICertificateResolver {
-    /// <summary>
-    /// Fetches all certificates from NGINX Proxy Manager.
-    /// </summary>
-    /// <exception cref="InvalidOperationException">If the API call fails.</exception>
-    Task<IReadOnlyList<NpmCertificateInfo>> FetchAsync(NginxProxySdk sdk, CancellationToken cancellationToken = default);
-
     /// <summary>
     /// Resolves <paramref name="reference"/> to a certificate ID. The reference
     /// may be a certificate nice-name or a domain covered by the certificate.

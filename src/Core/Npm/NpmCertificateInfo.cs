@@ -1,4 +1,4 @@
-namespace Shiron.ComposeToNginx.Cli.Services;
+namespace Shiron.ComposeToNginx.Core.Npm;
 
 /// <summary>
 /// A lightweight, SDK-independent view of an NPM certificate, used for
@@ -8,5 +8,6 @@ public sealed record NpmCertificateInfo(
     int Id,
     string? NiceName,
     IReadOnlyList<string> DomainNames,
-    string? Provider
+    string? Provider,
+    string? ExpiresOn
 );

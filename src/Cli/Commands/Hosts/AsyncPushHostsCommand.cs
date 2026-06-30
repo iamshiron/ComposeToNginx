@@ -1,7 +1,7 @@
-using NginxProxy.Sdk;
-using NginxProxy.Sdk.Nginx.ProxyHosts;
-using NpmCertificate = NginxProxy.Sdk.Nginx.Certificates.Certificates;
 using Shiron.ComposeToNginx.Cli.Services;
+using Shiron.ComposeToNginx.Core.Labels;
+using Shiron.ComposeToNginx.Core.Npm;
+using Shiron.ComposeToNginx.Core.Planning;
 using Shiron.Lib.DockerUtils;
 using Shiron.Lib.DockerUtils.Model;
 using Spectre.Console;
@@ -17,8 +17,8 @@ namespace Shiron.ComposeToNginx.Cli.Commands.Hosts;
 /// </summary>
 [Description("Read a Docker Compose file and create NGINX Proxy Manager proxy hosts from each service's exposed port.")]
 public sealed class AsyncPushHostsCommand(
-    INginxProxySdkFactory sdkFactory,
-    ICertificateResolver certificateResolver,
+    INpmClientFactory clientFactory,
+    HostPlanner hostPlanner,
     IAnsiConsole console,
     IComposeReader composeReader
 ) : AsyncCommand<AsyncPushHostsCommand.Settings> {
@@ -68,47 +68,28 @@ public sealed class AsyncPushHostsCommand(
         }
 
         // ── 2. Categorise services ────────────────────────────────────────
-        var labelMode = settings.LabelMode;
         var nonInteractive = settings.IsNonInteractive;
+        var cat = hostPlanner.Categorise(services, settings.LabelMode);
 
-        var labelled = new List<HostLabelConfig>();
-        var unmanaged = new List<Service>();
-        var labelErrors = new List<LabelConfigException>();
+        foreach (var service in cat.SkippedNoPort)
+            console.MarkupLine($"  [grey]Skip[/] [bold]{Markup.Escape(service.Name)}[/][grey] — no exposed ports.[/]");
 
-        foreach (var service in services) {
-            var config = TryCategorise(service, labelMode);
-            switch (config) {
-                case CategoriseResult.Managed managed:
-                    labelled.Add(managed.Config);
-                    break;
-                case CategoriseResult.Error error:
-                    labelErrors.Add(error.Exception);
-                    break;
-                case CategoriseResult.Unmanaged:
-                    if (HasUsablePort(service))
-                        unmanaged.Add(service);
-                    else
-                        console.MarkupLine($"  [grey]Skip[/] [bold]{Markup.Escape(service.Name)}[/][grey] — no exposed ports.[/]");
-                    break;
-            }
-        }
-
-        if (labelErrors.Count > 0) {
+        if (cat.Errors.Count > 0) {
             console.MarkupLine("[red]Aborting: invalid npm.* labels detected.[/]");
-            foreach (var ex in labelErrors)
+            foreach (var ex in cat.Errors)
                 console.MarkupLine($"  [red]•[/] {Markup.Escape(ex.Message)}");
             return 1;
         }
 
-        if (labelMode == LabelMode.Require && unmanaged.Count > 0) {
+        if (settings.LabelMode == LabelMode.Require && cat.UnmanagedWithPort.Count > 0) {
             console.MarkupLine("[red]Aborting: --label-mode=require but the following services have ports but no npm.host label:[/]");
-            foreach (var s in unmanaged)
+            foreach (var s in cat.UnmanagedWithPort)
                 console.MarkupLine($"  [red]•[/] [bold]{Markup.Escape(s.Name)}[/]");
             return 1;
         }
 
-        var anyLabelled = labelled.Count > 0;
-        var needInteractiveFallback = unmanaged.Count > 0 && !nonInteractive;
+        var anyLabelled = cat.Managed.Count > 0;
+        var needInteractiveFallback = cat.UnmanagedWithPort.Count > 0 && !nonInteractive;
 
         console.MarkupLine("[bold]Generate proxy hosts from a Docker Compose file[/]");
         if (anyLabelled && !needInteractiveFallback)
@@ -116,53 +97,41 @@ public sealed class AsyncPushHostsCommand(
         console.WriteLine();
 
         // ── 3. Connect + fetch reference data ─────────────────────────────
-        var anySsl = labelled.Any(l => l.Ssl) || needInteractiveFallback;
-        var sdkRequired = !settings.DryRun || anySsl;
+        var anySsl = cat.Managed.Any(l => l.Ssl) || needInteractiveFallback;
+        var clientRequired = !settings.DryRun || anySsl;
 
-        var sdk = await TryCreateSdkAsync(settings, cancellationToken, required: sdkRequired).ConfigureAwait(false);
-        if (sdk is null && sdkRequired) return 1;
+        var client = await TryCreateClientAsync(settings, cancellationToken, required: clientRequired).ConfigureAwait(false);
+        if (client is null && clientRequired) return 1;
 
         IReadOnlyList<NpmCertificateInfo> certs = [];
-        if (anySsl && sdk is not null) {
+        if (anySsl && client is not null) {
             try {
-                certs = await certificateResolver.FetchAsync(sdk, cancellationToken).ConfigureAwait(false);
+                certs = await client.GetCertificatesAsync(cancellationToken).ConfigureAwait(false);
             } catch (Exception ex) {
-                if (labelled.Any(l => l.Ssl)) {
+                if (cat.Managed.Any(l => l.Ssl)) {
                     return console.WriteError("Failed to load certificates", ex);
                 }
                 console.MarkupLine($"[yellow]Could not load certificates ({Markup.Escape(ex.Message)}); continuing without selection.[/]");
             }
         }
 
-        var existingIndex = await LoadExistingHostIndexAsync(sdk, cancellationToken).ConfigureAwait(false);
+        var existingIndex = await LoadExistingHostIndexAsync(client, cancellationToken).ConfigureAwait(false);
 
         // ── 4. Accumulate (transaction) ───────────────────────────────────
         var planned = new List<PlannedHost>();
-        var accumulationErrors = new List<string>();
 
         // 4a. Label-driven hosts
-        foreach (var cfg in labelled) {
+        var enabledManaged = new List<HostLabelConfig>();
+        foreach (var cfg in cat.Managed) {
             if (!cfg.Enabled) {
                 console.MarkupLine($"  [grey]Skip[/] [bold]{Markup.Escape(cfg.Service)}[/][grey] — npm.enabled=false.[/]");
                 continue;
             }
-
-            int? certId = null;
-            if (cfg.Ssl) {
-                certId = ResolveCertificate(cfg, certs);
-                if (certId is null) {
-                    var domainList = string.Join(", ", cfg.Domains);
-                    if (cfg.Certificate is not null)
-                        accumulationErrors.Add($"Service '{cfg.Service}': certificate '{cfg.Certificate}' not found in NPM (checked nice-name and domain coverage for [{domainList}]).");
-                    else
-                        accumulationErrors.Add($"Service '{cfg.Service}': no certificate found covering [{domainList}]. Add one to NPM or set npm.cert.");
-                    continue;
-                }
-            }
-
-            var overwriteId = FindOverwriteTarget(existingIndex, cfg.Domains);
-            planned.Add(ToPlannedHost(cfg, certId, overwriteId));
+            enabledManaged.Add(cfg);
         }
+
+        var labelPlan = hostPlanner.PlanLabelled(enabledManaged, certs, existingIndex);
+        planned.AddRange(labelPlan.Planned);
 
         // 4b. Interactive fallback for unlabelled services
         InteractiveDefaults? defaults = null;
@@ -170,7 +139,7 @@ public sealed class AsyncPushHostsCommand(
             defaults = PromptDefaults(certs);
         }
 
-        foreach (var service in unmanaged) {
+        foreach (var service in cat.UnmanagedWithPort) {
             var exposed = service.Ports[0];
             if (!int.TryParse(exposed.HostPort, out var forwardPort) || forwardPort is < MinPort or > MaxPort) {
                 console.MarkupLine($"  [grey]Skip[/] [bold]{Markup.Escape(service.Name)}[/][grey] — exposed port '[yellow]{Markup.Escape(exposed.HostPort)}[/][grey]' is not a single numeric port.[/]");
@@ -188,9 +157,9 @@ public sealed class AsyncPushHostsCommand(
         }
 
         // ── 5. Abort on accumulation errors ───────────────────────────────
-        if (accumulationErrors.Count > 0) {
+        if (labelPlan.Errors.Count > 0) {
             console.MarkupLine("[red]Aborting: configuration errors detected during planning.[/]");
-            foreach (var e in accumulationErrors)
+            foreach (var e in labelPlan.Errors)
                 console.MarkupLine($"  [red]•[/] {Markup.Escape(e)}");
             return 1;
         }
@@ -211,7 +180,7 @@ public sealed class AsyncPushHostsCommand(
             return 0;
         }
 
-        if (sdk is null) return 1;
+        if (client is null) return 1;
 
         // ── 8. Confirm ────────────────────────────────────────────────────
         var toDelete = planned.Where(p => p.OverwritesHostId is not null).ToList();
@@ -225,46 +194,7 @@ public sealed class AsyncPushHostsCommand(
         }
 
         // ── 9. Apply ──────────────────────────────────────────────────────
-        return await PushHostsAsync(sdk, planned, toDelete, cancellationToken).ConfigureAwait(false);
-    }
-
-    // ── Categorisation ────────────────────────────────────────────────────
-
-    private abstract class CategoriseResult {
-        public sealed class Managed(HostLabelConfig config) : CategoriseResult {
-            public HostLabelConfig Config { get; } = config;
-        }
-        public sealed class Unmanaged : CategoriseResult;
-        public sealed class Error(LabelConfigException exception) : CategoriseResult {
-            public LabelConfigException Exception { get; } = exception;
-        }
-    }
-
-    private static CategoriseResult TryCategorise(Service service, LabelMode labelMode) {
-        if (labelMode == LabelMode.Ignore)
-            return new CategoriseResult.Unmanaged();
-
-        try {
-            var config = LabelConfigParser.TryParse(service);
-            return config is not null
-                ? new CategoriseResult.Managed(config)
-                : new CategoriseResult.Unmanaged();
-        } catch (LabelConfigException ex) {
-            return new CategoriseResult.Error(ex);
-        }
-    }
-
-    private static bool HasUsablePort(Service service) =>
-        service.Ports.Length > 0;
-
-    // ── Certificate resolution ────────────────────────────────────────────
-
-    private int? ResolveCertificate(HostLabelConfig cfg, IReadOnlyList<NpmCertificateInfo> certs) {
-        if (cfg.Certificate is not null)
-            return certificateResolver.FindByReference(certs, cfg.Certificate);
-
-        var primary = cfg.Domains[0];
-        return certificateResolver.FindByDomain(certs, primary);
+        return await ApplyAsync(client, planned, toDelete, cancellationToken).ConfigureAwait(false);
     }
 
     // ── Interactive prompts ───────────────────────────────────────────────
@@ -305,10 +235,10 @@ public sealed class AsyncPushHostsCommand(
 
     private PlannedHost? PromptForService(Service service, int forwardPort, InteractiveDefaults defaults, ExistingHostIndex existingIndex) {
         var defaultDomain = $"{service.Name}.{defaults.BaseDomain}";
-        var domainMatch = FindByDomain(existingIndex, defaultDomain);
-        var portMatch = FindByPort(existingIndex, forwardPort);
+        var domainMatch = existingIndex.FindByDomain(defaultDomain);
+        var portMatch = existingIndex.FindByPort(forwardPort);
         var identical = domainMatch is not null
-            && IsIdentical(domainMatch, defaults.ForwardHost, forwardPort, defaults.UseSsl, defaults.CertificateId);
+            && domainMatch.IsIdentical(defaults.ForwardHost, forwardPort, defaults.UseSsl, defaults.CertificateId);
 
         var title = $"  [bold]{Markup.Escape(service.Name)}[/]  [grey]→ http://{Markup.Escape(defaults.ForwardHost)}:{forwardPort}[/]";
         var options = new List<HostOption>();
@@ -358,13 +288,13 @@ public sealed class AsyncPushHostsCommand(
                         .DefaultValue(defaultDomain)
                         .Validate(ValidateHostname)
                 );
-                var customExisting = FindByDomain(existingIndex, customDomain);
+                var customExisting = existingIndex.FindByDomain(customDomain);
                 if (customExisting is not null) {
                     console.MarkupLine($"    [yellow]'{Markup.Escape(customDomain)}' already exists as host #{customExisting.Id} — adding will overwrite it.[/]");
                 }
-                return ToPlannedHostInteractive(service.Name, [customDomain], defaults.ForwardHost, forwardPort, defaults.UseSsl, defaults.CertificateId, customExisting?.Id);
+                return PlannedHost.ForInteractive(service.Name, [customDomain], defaults.ForwardHost, forwardPort, defaults.UseSsl, defaults.CertificateId, customExisting?.Id);
             default:
-                return ToPlannedHostInteractive(service.Name, [defaultDomain], defaults.ForwardHost, forwardPort, defaults.UseSsl, defaults.CertificateId, overwriteTarget?.Id);
+                return PlannedHost.ForInteractive(service.Name, [defaultDomain], defaults.ForwardHost, forwardPort, defaults.UseSsl, defaults.CertificateId, overwriteTarget?.Id);
         }
     }
 
@@ -388,54 +318,9 @@ public sealed class AsyncPushHostsCommand(
         return new CertificateChoice(cert.Id, $"#{cert.Id} — {label}");
     }
 
-    // ── PlannedHost construction ──────────────────────────────────────────
+    // ── Client + reference data ──────────────────────────────────────────
 
-    private static PlannedHost ToPlannedHost(HostLabelConfig cfg, int? certId, int? overwriteId) =>
-        new(
-            cfg.Service,
-            cfg.Domains,
-            cfg.ForwardHost,
-            cfg.ForwardPort,
-            cfg.ForwardScheme,
-            cfg.Ssl,
-            certId,
-            cfg.ForceSsl,
-            cfg.Http2,
-            cfg.Websocket,
-            cfg.BlockExploits,
-            cfg.Caching,
-            cfg.Hsts,
-            cfg.Enabled,
-            overwriteId
-        );
-
-    private static PlannedHost ToPlannedHostInteractive(
-        string service, IReadOnlyList<string> domains, string forwardHost, int forwardPort,
-        bool ssl, int? certId, int? overwriteId
-    ) {
-        var hasCert = ssl && certId is not null;
-        return new PlannedHost(
-            service,
-            domains,
-            forwardHost,
-            forwardPort,
-            "http",
-            ssl,
-            certId,
-            hasCert,
-            hasCert,
-            true,
-            true,
-            false,
-            false,
-            true,
-            overwriteId
-        );
-    }
-
-    // ── Existing host index ───────────────────────────────────────────────
-
-    private async Task<NginxProxySdk?> TryCreateSdkAsync(Settings settings, CancellationToken cancellationToken, bool required) {
+    private async Task<INpmClient?> TryCreateClientAsync(Settings settings, CancellationToken cancellationToken, bool required) {
         NpmConnectionOptions options;
         try {
             options = settings.ToConnectionOptions();
@@ -449,7 +334,7 @@ public sealed class AsyncPushHostsCommand(
         }
 
         try {
-            return await sdkFactory.CreateAsync(options, cancellationToken).ConfigureAwait(false);
+            return await clientFactory.CreateAsync(options, cancellationToken).ConfigureAwait(false);
         } catch (Exception ex) {
             if (required) {
                 console.WriteError("Authentication failed", ex);
@@ -460,76 +345,17 @@ public sealed class AsyncPushHostsCommand(
         }
     }
 
-    private async Task<ExistingHostIndex> LoadExistingHostIndexAsync(NginxProxySdk? sdk, CancellationToken cancellationToken) {
-        if (sdk is null) return ExistingHostIndex.Empty;
+    private async Task<ExistingHostIndex> LoadExistingHostIndexAsync(INpmClient? client, CancellationToken cancellationToken) {
+        if (client is null) return ExistingHostIndex.Empty;
 
         try {
-            var hosts = await sdk.Nginx.ProxyHosts.GetAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
-            return IndexExistingHosts(hosts ?? []);
+            var hosts = await client.GetProxyHostsAsync(cancellationToken).ConfigureAwait(false);
+            return ExistingHostIndex.From(hosts);
         } catch (Exception ex) {
             console.MarkupLine($"[yellow]Could not load existing hosts ({Markup.Escape(ex.Message)}); overwrite detection is disabled.[/]");
             return ExistingHostIndex.Empty;
         }
     }
-
-    private static ExistingHostIndex IndexExistingHosts(IReadOnlyList<ProxyHosts> hosts) {
-        var byDomain = new Dictionary<string, ExistingHost>(StringComparer.OrdinalIgnoreCase);
-        var byPort = new Dictionary<int, ExistingHost>();
-
-        foreach (var host in hosts) {
-            var sig = DomainSignature(host.DomainNames);
-            var existing = new ExistingHost(
-                host.Id,
-                sig ?? "",
-                host.DomainNames ?? [],
-                host.ForwardHost,
-                host.ForwardPort,
-                ExtractCertificateId(host.CertificateId),
-                host.SslForced
-            );
-
-            if (sig is not null && !byDomain.ContainsKey(sig)) {
-                byDomain[sig] = existing;
-            }
-            if (host.ForwardPort is int port && !byPort.ContainsKey(port)) {
-                byPort[port] = existing;
-            }
-        }
-
-        return new ExistingHostIndex(byDomain, byPort);
-    }
-
-    private static int? ExtractCertificateId(ProxyHosts.ProxyHosts_certificate_id? value) => value?.Integer;
-
-    private static string? DomainSignature(IReadOnlyList<string>? domains) {
-        if (domains is null || domains.Count == 0) return null;
-        return string.Join(',', domains.Select(d => d.Trim().ToLowerInvariant()).OrderBy(d => d));
-    }
-
-    private static int? FindOverwriteTarget(ExistingHostIndex index, IReadOnlyList<string> domains) {
-        var sig = DomainSignature(domains);
-        return sig is not null && index.ByDomain.TryGetValue(sig, out var existing) ? existing.Id : null;
-    }
-
-    private static ExistingHost? FindByDomain(ExistingHostIndex index, string domain) {
-        var sig = DomainSignature([domain]);
-        return sig is not null && index.ByDomain.TryGetValue(sig, out var existing) ? existing : null;
-    }
-
-    private static ExistingHost? FindByPort(ExistingHostIndex index, int port) =>
-        index.ByPort.TryGetValue(port, out var existing) ? existing : null;
-
-    private static bool IsIdentical(ExistingHost existing, string forwardHost, int forwardPort, bool useSsl, int? certificateId) {
-        if (!string.Equals(existing.ForwardHost, forwardHost, StringComparison.OrdinalIgnoreCase)) return false;
-        if (existing.ForwardPort != forwardPort) return false;
-
-        var plannedSslForced = useSsl && certificateId is not null;
-        var existingSslForced = existing.SslForced ?? false;
-        return plannedSslForced == existingSslForced && existing.CertificateId == certificateId;
-    }
-
-    private static string DisplayDomain(ExistingHost host) =>
-        host.DomainNames is { Count: > 0 } names ? string.Join(", ", names) : host.Signature;
 
     // ── Rendering ─────────────────────────────────────────────────────────
 
@@ -540,6 +366,9 @@ public sealed class AsyncPushHostsCommand(
             ? ValidationResult.Success()
             : ValidationResult.Error("[red]Enter a valid hostname (letters, digits, dots, hyphens).[/]");
     }
+
+    private static string DisplayDomain(ExistingHost host) =>
+        host.DomainNames is { Count: > 0 } names ? string.Join(", ", names) : host.Signature;
 
     private void RenderOverview(List<PlannedHost> planned) {
         var table = new Table().Border(TableBorder.Rounded).Title("[bold]Planned proxy hosts[/]");
@@ -564,7 +393,7 @@ public sealed class AsyncPushHostsCommand(
 
     // ── Apply ─────────────────────────────────────────────────────────────
 
-    private async Task<int> PushHostsAsync(NginxProxySdk sdk, List<PlannedHost> planned, List<PlannedHost> toDelete, CancellationToken cancellationToken) {
+    private async Task<int> ApplyAsync(INpmClient client, List<PlannedHost> planned, List<PlannedHost> toDelete, CancellationToken cancellationToken) {
         var deleted = 0;
         var deleteFailed = 0;
 
@@ -573,7 +402,7 @@ public sealed class AsyncPushHostsCommand(
             foreach (var h in toDelete) {
                 if (h.OverwritesHostId is not int id) continue;
                 try {
-                    await sdk.Nginx.ProxyHosts[id].DeleteAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
+                    await client.DeleteProxyHostAsync(id, cancellationToken).ConfigureAwait(false);
                     console.MarkupLine($"  [red]Deleted[/] host #{id} [grey]({Markup.Escape(string.Join(", ", h.Domains))})[/]");
                     deleted++;
                 } catch (Exception ex) {
@@ -589,9 +418,9 @@ public sealed class AsyncPushHostsCommand(
         console.MarkupLine($"[green]Creating {planned.Count} proxy host(s)…[/]");
         foreach (var h in planned) {
             try {
-                var body = BuildRequestBody(h);
-                var response = await sdk.Nginx.ProxyHosts.PostAsProxyHostsPostResponseAsync(body, cancellationToken: cancellationToken).ConfigureAwait(false);
-                console.MarkupLine($"  [green]Created[/] [bold]{Markup.Escape(h.Service)}[/] → {Markup.Escape(string.Join(", ", h.Domains))} [grey](#{response?.Id})[/]");
+                var request = ProxyHostRequestBuilder.Build(h);
+                var responseId = await client.CreateProxyHostAsync(request, cancellationToken).ConfigureAwait(false);
+                console.MarkupLine($"  [green]Created[/] [bold]{Markup.Escape(h.Service)}[/] → {Markup.Escape(string.Join(", ", h.Domains))} [grey](#{responseId})[/]");
                 created++;
             } catch (Exception ex) {
                 console.MarkupLine($"  [red]Failed to create {Markup.Escape(string.Join(", ", h.Domains))}:[/] {Markup.Escape(ex.Message)}");
@@ -609,83 +438,11 @@ public sealed class AsyncPushHostsCommand(
         return totalFailed > 0 ? 1 : 0;
     }
 
-    private static ProxyHostsPostRequestBody BuildRequestBody(PlannedHost h) {
-        var hasCert = h.CertificateId is not null;
-        var scheme = h.ForwardScheme.Equals("https", StringComparison.OrdinalIgnoreCase)
-            ? ProxyHostsPostRequestBody_forward_scheme.Https
-            : ProxyHostsPostRequestBody_forward_scheme.Http;
-
-        return new ProxyHostsPostRequestBody {
-            DomainNames = h.Domains.ToList(),
-            ForwardScheme = scheme,
-            ForwardHost = h.ForwardHost,
-            ForwardPort = h.ForwardPort,
-            CertificateId = h.CertificateId is null ? null : new() { Integer = h.CertificateId },
-            SslForced = hasCert && h.ForceSsl,
-            Http2Support = hasCert && h.Http2,
-            HstsEnabled = h.Hsts,
-            BlockExploits = h.BlockExploits,
-            CachingEnabled = h.Caching,
-            AllowWebsocketUpgrade = h.Websocket,
-            Enabled = h.Enabled,
-        };
-    }
-
     // ── Types ─────────────────────────────────────────────────────────────
-
-    internal sealed record PlannedHost(
-        string Service,
-        IReadOnlyList<string> Domains,
-        string ForwardHost,
-        int ForwardPort,
-        string ForwardScheme,
-        bool Ssl,
-        int? CertificateId,
-        bool ForceSsl,
-        bool Http2,
-        bool Websocket,
-        bool BlockExploits,
-        bool Caching,
-        bool Hsts,
-        bool Enabled,
-        int? OverwritesHostId
-    );
-
-    private sealed record ExistingHost(
-        int? Id,
-        string Signature,
-        IReadOnlyList<string> DomainNames,
-        string? ForwardHost,
-        int? ForwardPort,
-        int? CertificateId,
-        bool? SslForced
-    );
-
-    private sealed record ExistingHostIndex(
-        IReadOnlyDictionary<string, ExistingHost> ByDomain,
-        IReadOnlyDictionary<int, ExistingHost> ByPort
-    ) {
-        public static ExistingHostIndex Empty { get; } = new(
-            new Dictionary<string, ExistingHost>(StringComparer.OrdinalIgnoreCase),
-            new Dictionary<int, ExistingHost>()
-        );
-    }
 
     private sealed record CertificateChoice(int? Id, string Display);
 
     private enum HostDecision { Include, Custom, Skip }
 
     private sealed record HostOption(HostDecision Decision, string Display);
-}
-
-/// <summary>
-/// Controls how Docker Compose <c>npm.*</c> labels are interpreted.
-/// </summary>
-public enum LabelMode {
-    /// <summary>Use labels when present; fall back to interactive prompts otherwise.</summary>
-    Auto,
-    /// <summary>Every ported service must have an <c>npm.host</c> label; error if missing.</summary>
-    Require,
-    /// <summary>Ignore labels entirely; always use interactive prompts.</summary>
-    Ignore
 }

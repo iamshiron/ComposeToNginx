@@ -1,4 +1,4 @@
-namespace Shiron.ComposeToNginx.Cli.Services;
+namespace Shiron.ComposeToNginx.Core.Labels;
 
 /// <summary>
 /// Parsed proxy-host intent declared via Docker Compose <c>npm.*</c> labels.

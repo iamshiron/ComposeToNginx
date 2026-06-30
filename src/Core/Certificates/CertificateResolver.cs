@@ -1,23 +1,9 @@
-using NginxProxy.Sdk;
-using NpmCertificate = NginxProxy.Sdk.Nginx.Certificates.Certificates;
-using Shiron.ComposeToNginx.Cli.Services;
+using Shiron.ComposeToNginx.Core.Npm;
 
-namespace Shiron.ComposeToNginx.Cli.Services.Impl;
+namespace Shiron.ComposeToNginx.Core.Certificates;
 
 /// <inheritdoc/>
 public sealed class CertificateResolver : ICertificateResolver {
-    /// <inheritdoc/>
-    public async Task<IReadOnlyList<NpmCertificateInfo>> FetchAsync(NginxProxySdk sdk, CancellationToken cancellationToken = default) {
-        List<NpmCertificate> certs;
-        try {
-            certs = await sdk.Nginx.Certificates.GetAsync(cancellationToken: cancellationToken).ConfigureAwait(false) ?? [];
-        } catch (Exception ex) {
-            throw new InvalidOperationException($"Could not load certificates from NGINX Proxy Manager: {ex.Message}", ex);
-        }
-
-        return certs.Select(ToInfo).ToList();
-    }
-
     /// <inheritdoc/>
     public int? FindByReference(IReadOnlyList<NpmCertificateInfo> certificates, string reference) {
         var byName = certificates.FirstOrDefault(c =>
@@ -43,12 +29,4 @@ public sealed class CertificateResolver : ICertificateResolver {
         var suffix = pattern[1..];
         return domain.EndsWith(suffix, StringComparison.OrdinalIgnoreCase);
     }
-
-    private static NpmCertificateInfo ToInfo(NpmCertificate cert) =>
-        new(
-            cert.Id ?? 0,
-            cert.NiceName,
-            cert.DomainNames ?? [],
-            cert.Provider
-        );
 }

@@ -1,6 +1,5 @@
-using NginxProxy.Sdk;
-using NginxProxy.Sdk.Nginx.ProxyHosts;
 using Shiron.ComposeToNginx.Cli.Services;
+using Shiron.ComposeToNginx.Core.Npm;
 using Spectre.Console;
 using Spectre.Console.Cli;
 using System.ComponentModel;
@@ -8,7 +7,7 @@ using System.ComponentModel;
 namespace Shiron.ComposeToNginx.Cli.Commands.Hosts;
 
 [Description("List the proxy hosts currently configured in NGINX Proxy Manager.")]
-public sealed class AsyncListHostsCommand(INginxProxySdkFactory sdkFactory, IAnsiConsole console) : AsyncCommand<AsyncListHostsCommand.Settings> {
+public sealed class AsyncListHostsCommand(INpmClientFactory clientFactory, IAnsiConsole console) : AsyncCommand<AsyncListHostsCommand.Settings> {
     public sealed class Settings : NpmConnectionSettings;
 
     protected override async Task<int> ExecuteAsync(CommandContext context, Settings settings, CancellationToken cancellationToken) {
@@ -19,16 +18,16 @@ public sealed class AsyncListHostsCommand(INginxProxySdkFactory sdkFactory, IAns
             return console.WriteError("Configuration error", ex);
         }
 
-        NginxProxySdk sdk;
+        INpmClient client;
         try {
-            sdk = await sdkFactory.CreateAsync(options, cancellationToken).ConfigureAwait(false);
+            client = await clientFactory.CreateAsync(options, cancellationToken).ConfigureAwait(false);
         } catch (Exception ex) {
             return console.WriteError("Authentication failed", ex);
         }
 
-        List<ProxyHosts> hosts;
+        IReadOnlyList<NpmProxyHostInfo> hosts;
         try {
-            hosts = await sdk.Nginx.ProxyHosts.GetAsync(cancellationToken: cancellationToken).ConfigureAwait(false) ?? [];
+            hosts = await client.GetProxyHostsAsync(cancellationToken).ConfigureAwait(false);
         } catch (Exception ex) {
             return console.WriteError("Failed to fetch proxy hosts", ex);
         }
@@ -50,7 +49,7 @@ public sealed class AsyncListHostsCommand(INginxProxySdkFactory sdkFactory, IAns
                 ? string.Join(", ", names)
                 : "[grey]-[/]";
 
-            var scheme = host.ForwardScheme?.ToString().ToLowerInvariant() ?? "http";
+            var scheme = host.ForwardScheme ?? "http";
             var forwardHost = Markup.Escape(host.ForwardHost ?? "?");
             var forwardPort = host.ForwardPort?.ToString() ?? "?";
             var forward = $"{scheme}://{forwardHost}:{forwardPort}";

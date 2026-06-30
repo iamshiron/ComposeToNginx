@@ -1,4 +1,4 @@
-namespace Shiron.ComposeToNginx.Cli.Services;
+namespace Shiron.ComposeToNginx.Core.Labels;
 
 /// <summary>
 /// Thrown when a Docker Compose <c>npm.*</c> label contains an invalid or
