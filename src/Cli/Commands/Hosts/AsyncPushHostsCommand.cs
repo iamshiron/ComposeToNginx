@@ -87,17 +87,20 @@ public sealed class AsyncPushHostsCommand(
                 console.MarkupLine($"  [red]•[/] [bold]{Markup.Escape(s.Name)}[/]");
             return 1;
         }
-
         var anyLabelled = cat.Managed.Count > 0;
-        var needInteractiveFallback = cat.UnmanagedWithPort.Count > 0 && !nonInteractive;
+        var hasUnmanaged = cat.UnmanagedWithPort.Count > 0;
 
         console.MarkupLine("[bold]Generate proxy hosts from a Docker Compose file[/]");
-        if (anyLabelled && !needInteractiveFallback)
-            console.MarkupLine("[grey]Label-driven mode — no prompts.[/]");
+
+        var interactiveFallback = ResolveInteractiveFallback(
+            settings.LabelMode, nonInteractive, hasUnmanaged, anyLabelled, cat.UnmanagedWithPort.Count);
+
+        if (!interactiveFallback && anyLabelled && !hasUnmanaged)
+            console.MarkupLine("[grey]All services are label-driven — no prompts.[/]");
         console.WriteLine();
 
         // ── 3. Connect + fetch reference data ─────────────────────────────
-        var anySsl = cat.Managed.Any(l => l.Ssl) || needInteractiveFallback;
+        var anySsl = cat.Managed.Any(l => l.Ssl) || interactiveFallback;
         var clientRequired = !settings.DryRun || anySsl;
 
         var client = await TryCreateClientAsync(settings, cancellationToken, required: clientRequired).ConfigureAwait(false);
@@ -133,27 +136,34 @@ public sealed class AsyncPushHostsCommand(
         var labelPlan = hostPlanner.PlanLabelled(enabledManaged, certs, existingIndex);
         planned.AddRange(labelPlan.Planned);
 
-        // 4b. Interactive fallback for unlabelled services
+        // 4b. Unlabelled services: prompt interactively, or skip.
         InteractiveDefaults? defaults = null;
-        if (needInteractiveFallback) {
+        if (interactiveFallback) {
+            if (anyLabelled)
+                console.MarkupLine($"[grey]{cat.UnmanagedWithPort.Count} service(s) lack npm.* labels — entering interactive mode for those.[/]");
+            else if (settings.LabelMode == LabelMode.Ignore)
+                console.MarkupLine("[grey]Ignoring labels — entering interactive mode for all ported services.[/]");
+            else
+                console.MarkupLine("[grey]No services carry npm.* labels — entering interactive mode.[/]");
+            console.WriteLine();
+
             defaults = PromptDefaults(certs);
-        }
+            foreach (var service in cat.UnmanagedWithPort) {
+                var exposed = service.Ports[0];
+                if (!int.TryParse(exposed.HostPort, out var forwardPort) || forwardPort is < MinPort or > MaxPort) {
+                    console.MarkupLine($"  [grey]Skip[/] [bold]{Markup.Escape(service.Name)}[/][grey] — exposed port '[yellow]{Markup.Escape(exposed.HostPort)}[/][grey]' is not a single numeric port.[/]");
+                    continue;
+                }
 
-        foreach (var service in cat.UnmanagedWithPort) {
-            var exposed = service.Ports[0];
-            if (!int.TryParse(exposed.HostPort, out var forwardPort) || forwardPort is < MinPort or > MaxPort) {
-                console.MarkupLine($"  [grey]Skip[/] [bold]{Markup.Escape(service.Name)}[/][grey] — exposed port '[yellow]{Markup.Escape(exposed.HostPort)}[/][grey]' is not a single numeric port.[/]");
-                continue;
+                var plannedHost = PromptForService(service, forwardPort, defaults, existingIndex);
+                if (plannedHost is not null)
+                    planned.Add(plannedHost);
             }
-
-            if (nonInteractive) {
-                console.MarkupLine($"  [grey]Skip[/] [bold]{Markup.Escape(service.Name)}[/][grey] — no npm.host label (non-interactive mode).[/]");
-                continue;
+        } else {
+            foreach (var service in cat.UnmanagedWithPort) {
+                var reason = nonInteractive ? "non-interactive mode" : "skipped";
+                console.MarkupLine($"  [grey]Skip[/] [bold]{Markup.Escape(service.Name)}[/][grey] — no npm.host label ({reason}).[/]");
             }
-
-            var plannedHost = PromptForService(service, forwardPort, defaults!, existingIndex);
-            if (plannedHost is not null)
-                planned.Add(plannedHost);
         }
 
         // ── 5. Abort on accumulation errors ───────────────────────────────
@@ -169,35 +179,69 @@ public sealed class AsyncPushHostsCommand(
             return 0;
         }
 
-        // ── 6. Present ────────────────────────────────────────────────────
-        console.WriteLine();
-        RenderOverview(planned);
+        // ── 6. Detect no-op (idempotency) ────────────────────────────────
+        var toApply = hostPlanner.WithoutUpToDate(planned, existingIndex);
+        var inSync = planned.Count - toApply.Count;
 
-        // ── 7. Dry-run exit ───────────────────────────────────────────────
+        if (toApply.Count == 0) {
+            console.WriteLine();
+            console.MarkupLine($"[green]All {planned.Count} proxy host(s) are already in sync — nothing to do.[/]");
+            return 0;
+        }
+
+        if (inSync > 0)
+            console.MarkupLine($"[grey]{inSync} host(s) already in sync — skipping.[/]");
+
+        // ── 7. Present ────────────────────────────────────────────────────
+        console.WriteLine();
+        RenderOverview(toApply);
+
+        // ── 8. Dry-run exit ───────────────────────────────────────────────
         console.WriteLine();
         if (settings.DryRun) {
-            console.MarkupLine($"[green]Dry run complete.[/] [grey]{planned.Count} host(s) would be created. No changes were made.[/]");
+            console.MarkupLine($"[green]Dry run complete.[/] [grey]{toApply.Count} host(s) would be created. No changes were made.[/]");
             return 0;
         }
 
         if (client is null) return 1;
 
-        // ── 8. Confirm ────────────────────────────────────────────────────
-        var toDelete = planned.Where(p => p.OverwritesHostId is not null).ToList();
+        // ── 9. Confirm ────────────────────────────────────────────────────
+        var toDelete = toApply.Where(p => p.OverwritesHostId is not null).ToList();
         var deleteSummary = toDelete.Count > 0 ? $", delete {toDelete.Count} conflicting" : "";
 
         if (!nonInteractive) {
-            if (!console.Confirm($"Create {planned.Count} proxy host(s){deleteSummary} in NGINX Proxy Manager?", defaultValue: false)) {
+            if (!console.Confirm($"Create {toApply.Count} proxy host(s){deleteSummary} in NGINX Proxy Manager?", defaultValue: false)) {
                 console.MarkupLine("[yellow]Cancelled. No changes were made.[/]");
                 return 0;
             }
         }
 
-        // ── 9. Apply ──────────────────────────────────────────────────────
-        return await ApplyAsync(client, planned, toDelete, cancellationToken).ConfigureAwait(false);
+        // ── 10. Apply ─────────────────────────────────────────────────────
+        return await ApplyAsync(client, toApply, toDelete, cancellationToken).ConfigureAwait(false);
     }
 
     // ── Interactive prompts ───────────────────────────────────────────────
+
+    private bool ResolveInteractiveFallback(
+        LabelMode labelMode, bool nonInteractive, bool hasUnmanaged, bool anyLabelled, int unmanagedCount
+    ) {
+        if (nonInteractive || !hasUnmanaged) return false;
+        if (labelMode == LabelMode.Ignore) return true;
+        return anyLabelled ? PromptSkipOrFill(unmanagedCount) : true;
+    }
+
+    private bool PromptSkipOrFill(int unmanagedCount) {
+        var choice = console.Prompt(
+            new SelectionPrompt<FillDecision>()
+                .Title($"{unmanagedCount} service(s) lack [blue]npm.*[/] labels. How should they be handled?")
+                .AddChoices(FillDecision.Skip, FillDecision.Fill)
+                .UseConverter(d => d switch {
+                    FillDecision.Skip => "Skip them (label-driven only)",
+                    FillDecision.Fill => "Fill them in interactively",
+                    _ => d.ToString()
+                }));
+        return choice == FillDecision.Fill;
+    }
 
     private sealed record InteractiveDefaults(
         string ForwardHost,
@@ -207,9 +251,6 @@ public sealed class AsyncPushHostsCommand(
     );
 
     private InteractiveDefaults PromptDefaults(IReadOnlyList<NpmCertificateInfo> certs) {
-        console.MarkupLine("[grey]Some services lack npm.* labels — falling back to interactive mode for those.[/]");
-        console.WriteLine();
-
         var forwardHost = console.Prompt(
             new TextPrompt<string>("Default forward host [grey](where NPM sends traffic)[/]:")
                 .DefaultValue(DefaultForwardHost)
@@ -370,7 +411,7 @@ public sealed class AsyncPushHostsCommand(
     private static string DisplayDomain(ExistingHost host) =>
         host.DomainNames is { Count: > 0 } names ? string.Join(", ", names) : host.Signature;
 
-    private void RenderOverview(List<PlannedHost> planned) {
+    private void RenderOverview(IReadOnlyList<PlannedHost> planned) {
         var table = new Table().Border(TableBorder.Rounded).Title("[bold]Planned proxy hosts[/]");
         table.AddColumn("Service");
         table.AddColumn("Domains");
@@ -393,7 +434,7 @@ public sealed class AsyncPushHostsCommand(
 
     // ── Apply ─────────────────────────────────────────────────────────────
 
-    private async Task<int> ApplyAsync(INpmClient client, List<PlannedHost> planned, List<PlannedHost> toDelete, CancellationToken cancellationToken) {
+    private async Task<int> ApplyAsync(INpmClient client, IReadOnlyList<PlannedHost> planned, IReadOnlyList<PlannedHost> toDelete, CancellationToken cancellationToken) {
         var deleted = 0;
         var deleteFailed = 0;
 
@@ -443,6 +484,8 @@ public sealed class AsyncPushHostsCommand(
     private sealed record CertificateChoice(int? Id, string Display);
 
     private enum HostDecision { Include, Custom, Skip }
+
+    private enum FillDecision { Skip, Fill }
 
     private sealed record HostOption(HostDecision Decision, string Display);
 }

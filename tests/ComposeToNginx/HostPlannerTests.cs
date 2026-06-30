@@ -166,4 +166,64 @@ public class HostPlannerTests {
         Assert.True(p.Caching);
         Assert.True(p.Hsts);
     }
+
+    // ── WithoutUpToDate (idempotency) ─────────────────────────────────────
+
+    private static ExistingHostIndex Index(params NpmProxyHostInfo[] hosts) =>
+        ExistingHostIndex.From(hosts);
+
+    [Fact]
+    public void WithoutUpToDate_NewHost_Kept() {
+        var plan = _planner.PlanLabelled([Cfg("api", "api.example.com")], [], ExistingHostIndex.Empty);
+
+        var changes = _planner.WithoutUpToDate(plan.Planned, ExistingHostIndex.Empty);
+
+        Assert.Single(changes);
+    }
+
+    [Fact]
+    public void WithoutUpToDate_IdenticalHost_FilteredOut() {
+        var existing = Index(new NpmProxyHostInfo(1, ["api.example.com"], "host", 8080, "http", null, false, true));
+        var plan = _planner.PlanLabelled([Cfg("api", "api.example.com")], [], existing);
+
+        var changes = _planner.WithoutUpToDate(plan.Planned, existing);
+
+        Assert.Empty(changes);
+    }
+
+    [Fact]
+    public void WithoutUpToDate_SslIdenticalHost_FilteredOut() {
+        var existing = Index(new NpmProxyHostInfo(1, ["api.example.com"], "host", 8080, "http", 5, true, true));
+        var certs = new[] { Cert(5, "C", "api.example.com") };
+        var plan = _planner.PlanLabelled([Cfg("api", "api.example.com", ssl: true)], certs, existing);
+
+        var changes = _planner.WithoutUpToDate(plan.Planned, existing);
+
+        Assert.Empty(changes);
+    }
+
+    [Fact]
+    public void WithoutUpToDate_ChangedHost_Kept() {
+        // Same domain as the existing host, but a different forward port.
+        var existing = Index(new NpmProxyHostInfo(1, ["api.example.com"], "host", 9999, "http", null, false, true));
+        var plan = _planner.PlanLabelled([Cfg("api", "api.example.com", port: 8080)], [], existing);
+
+        var changes = _planner.WithoutUpToDate(plan.Planned, existing);
+
+        Assert.Single(changes);
+    }
+
+    [Fact]
+    public void WithoutUpToDate_Mixed_KeepsOnlyChanges() {
+        var existing = Index(new NpmProxyHostInfo(1, ["api.example.com"], "host", 8080, "http", null, false, true));
+        var plan = _planner.PlanLabelled([
+            Cfg("api", "api.example.com"),
+            Cfg("web", "web.example.com", port: 9090),
+        ], [], existing);
+
+        var changes = _planner.WithoutUpToDate(plan.Planned, existing);
+
+        Assert.Single(changes);
+        Assert.Equal("web", changes[0].Service);
+    }
 }

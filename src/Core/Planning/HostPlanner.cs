@@ -108,4 +108,27 @@ public sealed class HostPlanner(ICertificateResolver certificateResolver) {
 
         return new LabelledPlanResult(planned, errors);
     }
+
+    /// <summary>
+    /// Filters <paramref name="planned"/> down to the hosts that would actually
+    /// change NPM state: new hosts (no overwrite target) and hosts whose
+    /// configuration differs from the existing host they would overwrite. Hosts
+    /// that already match their existing counterpart are dropped, so a
+    /// <c>push</c> against an already-sync NPM is a no-op.
+    /// </summary>
+    public IReadOnlyList<PlannedHost> WithoutUpToDate(
+        IReadOnlyList<PlannedHost> planned,
+        ExistingHostIndex existingIndex
+    ) {
+        var changes = new List<PlannedHost>();
+        foreach (var p in planned) {
+            if (p.OverwritesHostId is not null
+                && existingIndex.FindByDomain(p.Domains) is { } existing
+                && existing.IsIdentical(p.ForwardHost, p.ForwardPort, p.Ssl, p.CertificateId)) {
+                continue;
+            }
+            changes.Add(p);
+        }
+        return changes;
+    }
 }
